@@ -1,0 +1,11 @@
+[Unit]
+Description=Jungle Leopard fan displays
+
+[Service]
+# Change the GIFs with `jlfan set`; they are saved in ~/.config/jlfan/fans
+ExecStart=/usr/bin/jlfan play
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target
