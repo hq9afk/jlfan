@@ -41,7 +41,7 @@ Things to know:
 
 ### Background service
 
-`./build.sh run` enables the `jlfan` user service, which runs `jlfan play` and starts at login. If a fan disconnects, the process exits and systemd restarts it after 3 s. Logs: `journalctl --user -u jlfan`.
+`./build.sh run` enables the `jlfan` user service, which runs `jlfan play` and starts at login. Fans that connect later, such as daisy-chained ones still starting up at boot, begin streaming within 2 s. If a fan disconnects, the process exits and systemd restarts it after 3 s. Logs: `journalctl --user -u jlfan`.
 
 Your choices are saved in `~/.config/jlfan/config.toml`. `set` and `rotate` write it, and you can also edit it by hand:
 

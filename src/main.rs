@@ -7,9 +7,13 @@ mod video;
 
 use config::{gif_for, load, put, rotate_for, save};
 use discover::{all_fans, usb_path};
-use std::{env, error::Error, fs, thread};
+use std::{env, error::Error, fs, path::PathBuf, thread, time::Duration};
 
 pub(crate) type R<T> = Result<T, Box<dyn Error>>;
+
+fn name(fans: &[PathBuf], i: usize) -> String {
+    format!("fan{} ({}, {})", i + 1, usb_path(&fans[i]), fans[i].display())
+}
 
 // "fan2" -> index 1, for n detected fans.
 fn fan_index(s: &str, n: usize) -> R<usize> {
@@ -60,22 +64,21 @@ fn run() -> R<()> {
                  jlfan set [fanN] FILE ...  save a GIF/image (no fanN = all fans) and apply it\n  \
                  jlfan rotate [fanN] N ...  rotate by N x 90° clockwise, N = 0..3 (no fanN = all fans)\n  \
                  jlfan play                 stream the saved GIFs (what the service runs)";
-    let fans = all_fans();
-    let name = |i: usize| format!("fan{} ({}, {})", i + 1, usb_path(&fans[i]), fans[i].display());
+    let mut fans = all_fans();
     let mut cfg = load()?;
 
     match a.as_slice() {
         ["info"] => {
             for i in 0..fans.len() {
                 let f = gif_for(&cfg, i).unwrap_or("-".into());
-                println!("{}: {f}, rotate {}", name(i), rotate_for(&cfg, i));
+                println!("{}: {f}, rotate {}", name(&fans, i), rotate_for(&cfg, i));
             }
             if fans.is_empty() { eprintln!("no 33c3:7792 fans found"); }
         }
         ["info", f] => {
             let i = fan_index(f, fans.len())?;
             let j = serial::open(&fans[i]).and_then(|mut p| serial::cmd(&mut p, 0x06, &[]))
-                .map_err(|e| format!("{}: {e} (is the jlfan service running?)", name(i)))?;
+                .map_err(|e| format!("{}: {e} (is the jlfan service running?)", name(&fans, i)))?;
             println!("{}", String::from_utf8_lossy(&j));
         }
         ["set", rest @ ..] if !rest.is_empty() => {
@@ -97,29 +100,41 @@ fn run() -> R<()> {
         }
         ["play"] => {
             if fans.is_empty() { return Err("no 33c3:7792 fans found".into()); }
-            let mut jobs = Vec::new();
-            for i in 0..fans.len() {
-                let Some(f) = gif_for(&cfg, i) else { continue };
+            let start = |fans: &[PathBuf], i: usize| -> R<()> {
+                let Some(f) = gif_for(&cfg, i) else { return Ok(()) };
                 let rot = rotate_for(&cfg, i);
-                eprintln!("{}: {f}, rotate {rot}", name(i));
+                eprintln!("{}: {f}, rotate {rot}", name(fans, i));
                 let frames: &'static [Vec<u8>] = video::to_jpegs(&f, rot).map_err(|e| format!("{f}: {e}"))?.leak();
-                jobs.push((fans[i].clone(), frames));
+                let path = fans[i].clone();
+                thread::spawn(move || {
+                    let e = serial::play(&path, frames)
+                        .err()
+                        .map_or("stream ended".into(), |e| e.to_string());
+                    // ponytail: any fan error kills the process; systemd Restart= reconnects and rediscovers ports
+                    eprintln!("{}: {e}", path.display());
+                    std::process::exit(1);
+                });
+                Ok(())
+            };
+            for i in 0..fans.len() {
+                start(&fans, i)?;
             }
-            let threads: Vec<_> = jobs
-                .into_iter()
-                .map(|(path, frames)| {
-                    thread::spawn(move || {
-                        let e = serial::play(&path, frames)
-                            .err()
-                            .map_or("stream ended".into(), |e| e.to_string());
-                        // ponytail: any fan error kills the process; systemd Restart= reconnects and rediscovers ports
-                        eprintln!("{}: {e}", path.display());
-                        std::process::exit(1);
-                    })
-                })
-                .collect();
-            for t in threads {
-                let _ = t.join();
+            /*
+            Daisy-chained fans enumerate seconds after the first one, often after the service starts.
+            New fans that sort after the running ones get their own stream; anything else renumbers
+            the fans, so exit and let systemd Restart= start over.
+            */
+            loop {
+                thread::sleep(Duration::from_secs(2));
+                let now = all_fans();
+                if !now.starts_with(&fans) {
+                    eprintln!("fan order changed, restarting");
+                    std::process::exit(1);
+                }
+                for i in fans.len()..now.len() {
+                    start(&now, i)?;
+                }
+                fans = now;
             }
         }
         _ => return Err(usage.into()),
